@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>上方向ジャーク検知デモ（DeviceMotion）</title>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+    .wrap { min-height: 100%; display: grid; place-items: center; background: #0f172a; color: #e2e8f0; padding: 24px; }
+    .card { width: min(680px, 100%); background: rgba(2,6,23,.65); border: 1px solid rgba(148,163,184,.2); border-radius: 20px; padding: 20px; box-shadow: 0 10px 30px rgba(0,0,0,.3); }
+    h1 { margin: 0 0 8px; font-size: 20px; }
+    p { margin: 6px 0; line-height: 1.6; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+    .box { background: rgba(148,163,184,.08); border: 1px solid rgba(148,163,184,.2); border-radius: 14px; padding: 12px; }
+    .label { font-size: 12px; color: #94a3b8; letter-spacing: .02em; }
+    .val { font-size: 14px; font-variant-numeric: tabular-nums; }
+    button { -webkit-tap-highlight-color: transparent; appearance: none; font-weight: 600; border: none; border-radius: 999px; padding: 12px 18px; cursor: pointer; background: #22c55e; color: #0f172a; }
+    button.secondary { background: #94a3b8; color: #0f172a; }
+    .status { font-weight: 700; }
+    .flash { animation: flash .35s ease-out; }
+    @keyframes flash { from { background-color: #14532d; } to { background-color: rgba(148,163,184,.08); } }
+    .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: rgba(148,163,184,.18); border: 1px solid rgba(148,163,184,.25) }
+    .ok { background:#22c55e; color:#0f172a; border-color:transparent }
+    .warn { background:#f59e0b; color:#0f172a; border-color:transparent }
+  </style>
+  <script>
+    // --- Android Chrome: detect if Motion Sensors are disabled at browser level ---
+    // We cannot read the setting directly, but we'll show a hint if devicemotion stays silent.
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card" id="card">
+      <h1>上方向ジャーク検知デモ（DeviceMotion）</h1>
+      <p>・iOS Safariでは<strong>ユーザー操作後に許可</strong>が必要です。まず下の「計測を有効化」を押してください。<br>
+         ・HTTPSまたはlocalhostで動かしてください（セキュアコンテキスト）。</p>
+
+      <div style="display:flex; gap:10px; margin:12px 0 6px; flex-wrap:wrap; align-items:center">
+        <button id="enableBtn">計測を有効化</button>
+        <button id="muteBtn" class="secondary">効果音ミュート</button>
+        <span class="pill" id="permPill">未許可</span>
+        <span class="pill" id="runPill">待機中</span>
+      </div>
+
+      <p class="status" id="status">準備中…</p>
+
+      <div class="row">
+        <div class="box">
+          <div class="label">しきい値（上方向加速度 m/s²）</div>
+          <div class="val"><input id="threshold" type="range" min="2" max="12" step="0.5" value="5" /> <span id="thresholdVal">5.0</span></div>
+        </div>
+        <div class="box">
+          <div class="label">クールダウン（ms）</div>
+          <div class="val"><input id="cooldown" type="range" min="200" max="2000" step="50" value="800" /> <span id="cooldownVal">800</span></div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:12px">
+        <div class="box" id="gBox">
+          <div class="label">推定重力 g ≈ |g|=9.81（LPFで推定）</div>
+          <div class="val" id="gVal">x: -, y: -, z: -</div>
+        </div>
+        <div class="box" id="linBox">
+          <div class="label">線形加速度（重力除去後）</div>
+          <div class="val" id="linVal">x: -, y: -, z: -</div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:12px">
+        <div class="box">
+          <div class="label">上方向成分 a↑（gの反対方向への投影）</div>
+          <div class="val" id="upVal">-</div>
+        </div>
+        <div class="box">
+          <div class="label">イベントレート（Hz, 直近1秒）</div>
+          <div class="val" id="rateVal">-</div>
+        </div>
+      </div>
+
+      <div class="box" style="margin-top:12px" id="logBox">
+        <div class="label">ログ</div>
+        <div class="val" id="log" style="white-space:pre-wrap; max-height:160px; overflow:auto"></div>
+      </div>
+    </div>
+  </div>
+
+  <audio id="beep" preload="auto">
+    <source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYBWFlaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" type="audio/wav">
+  </audio>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const enableBtn = document.getElementById('enableBtn');
+    const muteBtn = document.getElementById('muteBtn');
+    const permPill = document.getElementById('permPill');
+    const runPill = document.getElementById('runPill');
+    let sourcePillText = 'DeviceMotion';
+    const thresholdEl = document.getElementById('threshold');
+    const thresholdVal = document.getElementById('thresholdVal');
+    const cooldownEl = document.getElementById('cooldown');
+    const cooldownVal = document.getElementById('cooldownVal');
+    const gVal = document.getElementById('gVal');
+    const linVal = document.getElementById('linVal');
+    const upVal = document.getElementById('upVal');
+    const rateVal = document.getElementById('rateVal');
+    const logEl = document.getElementById('log');
+    const gBox = document.getElementById('gBox');
+    const linBox = document.getElementById('linBox');
+    const card = document.getElementById('card');
+    const beep = document.getElementById('beep');
+
+    let muted = false;
+    let lastTrigger = 0;
+    let samples = [];
+
+    let g = {x:0, y:0, z:0}; // low-passで推定する重力
+    const alpha = 0.90; // 0.85〜0.98くらいを状況に合わせて
+
+    function norm(v){ return Math.hypot(v.x, v.y, v.z); }
+    function addLog(s){ logEl.textContent = (s + "\n" + logEl.textContent).slice(0, 2000); }
+
+    function setPill(el, text, cls){ el.textContent = text; el.className = 'pill ' + (cls||''); }
+
+    function requestPermissionIfNeeded(){
+      if (typeof DeviceMotionEvent === 'undefined') {
+        statusEl.textContent = 'DeviceMotionEventが未対応のブラウザです。';
+        return Promise.reject();
+      }
+      if (typeof DeviceMotionEvent.requestPermission === 'function') {
+        // iOS 13+ 必須
+        return DeviceMotionEvent.requestPermission().then(state => {
+          if (state === 'granted') {
+            setPill(permPill, '許可済み', 'ok');
+            return true;
+          } else {
+            setPill(permPill, '拒否', 'warn');
+            throw new Error('権限が許可されませんでした');
+          }
+        });
+      } else {
+        setPill(permPill, '不要（許可済み）', 'ok');
+        return Promise.resolve(true);
+      }
+    }
+
+    function startDeviceMotion(){
+      window.addEventListener('devicemotion', onMotion, { passive: true });
+      sourcePillText = 'DeviceMotion';
+      setPill(runPill, '計測中 ('+sourcePillText+')', 'ok');
+      statusEl.textContent = '上に素早く振り上げてみてください。';
+    }
+
+    // --- Generic Sensor API fallback (Android Chrome向け) ---
+    let linSensor = null, gravSensor = null, accelSensor = null;
+    let gs = {x:0,y:0,z:0}; // gravity from GravitySensor or LPF from Accelerometer
+
+    function startGenericSensor(){
+      try {
+        if ('LinearAccelerationSensor' in window) {
+          linSensor = new LinearAccelerationSensor({frequency: 60});
+          linSensor.addEventListener('reading', onLinReading);
+          linSensor.start();
+        }
+        if ('GravitySensor' in window) {
+          gravSensor = new GravitySensor({frequency: 60});
+          gravSensor.addEventListener('reading', ()=>{
+            gs.x = gravSensor.x || 0; gs.y = gravSensor.y || 0; gs.z = gravSensor.z || 0;
+          });
+          gravSensor.start();
+        } else if ('Accelerometer' in window) {
+          // LPF to estimate gravity if GravitySensor is not available
+          accelSensor = new Accelerometer({frequency: 60});
+          accelSensor.addEventListener('reading', ()=>{
+            const ax = accelSensor.x||0, ay = accelSensor.y||0, az = accelSensor.z||0;
+            g.x = alpha * g.x + (1-alpha) * ax;
+            g.y = alpha * g.y + (1-alpha) * ay;
+            g.z = alpha * g.z + (1-alpha) * az;
+            gs = {x:g.x,y:g.y,z:g.z};
+            // synthesize linear acceleration for UI when no LinearAccelerationSensor
+            const lin = { x: ax - gs.x, y: ay - gs.y, z: az - gs.z };
+            updateUI(gs, lin);
+            projectAndMaybeTrigger(lin);
+          });
+          accelSensor.start();
+        }
+        sourcePillText = 'GenericSensor';
+        setPill(runPill, '計測中 ('+sourcePillText+')', 'ok');
+        statusEl.textContent = '上に素早く振り上げてみてください。';
+      } catch (err){
+        addLog('GenericSensor初期化失敗: ' + err.message);
+        setPill(runPill, '失敗', 'warn');
+      }
+    }
+
+    function onLinReading(){
+      const ax = linSensor.x||0, ay = linSensor.y||0, az = linSensor.z||0;
+      // gravity vector from GravitySensor or LPF fallback
+      const gx = (gravSensor && gravSensor.x!=null) ? gravSensor.x : gs.x;
+      const gy = (gravSensor && gravSensor.y!=null) ? gravSensor.y : gs.y;
+      const gz = (gravSensor && gravSensor.z!=null) ? gravSensor.z : gs.z;
+      updateUI({x:gx,y:gy,z:gz}, {x:ax,y:ay,z:az});
+      projectAndMaybeTrigger({x:ax,y:ay,z:az});
+    }
+
+    function updateUI(gVec, lin){
+      const gnorm = Math.hypot(gVec.x, gVec.y, gVec.z) || 9.81;
+      gVal.textContent = `x: ${gVec.x.toFixed(2)}, y: ${gVec.y.toFixed(2)}, z: ${gVec.z.toFixed(2)} | |g|=${gnorm.toFixed(2)}`;
+      linVal.textContent = `x: ${lin.x.toFixed(2)}, y: ${lin.y.toFixed(2)}, z: ${lin.z.toFixed(2)}`;
+      const t = performance.now();
+      samples.push(t);
+      while (samples.length && t - samples[0] > 1000) samples.shift();
+      rateVal.textContent = samples.length.toString();
+    }
+
+    function projectAndMaybeTrigger(lin){
+      const gnorm = Math.hypot(g.x, g.y, g.z) || Math.hypot(gs.x, gs.y, gs.z) || 9.81;
+      const up = { x: -(g.x||gs.x)/gnorm, y: -(g.y||gs.y)/gnorm, z: -(g.z||gs.z)/gnorm };
+      const aUp = lin.x*up.x + lin.y*up.y + lin.z*up.z;
+      upVal.textContent = `${aUp.toFixed(2)} m/s²`;
+      const threshold = parseFloat(thresholdEl.value);
+      const cooldown = parseInt(cooldownEl.value, 10);
+      const t = performance.now();
+      if (aUp > threshold && (t - lastTrigger) > cooldown) {
+        lastTrigger = t;
+        trigger();
+      }
+    }
+
+    enableBtn.addEventListener('click', async () => {
+      try {
+        const ok = await requestPermissionIfNeeded();
+        // Start DeviceMotion first
+        startDeviceMotion();
+        // If no devicemotion events arrive within 1500ms (Androidで無音ケース), fallback to GenericSensor
+        const before = samples.length;
+        setTimeout(()=>{
+          const noEvents = samples.length === before;
+          if (noEvents) {
+            addLog('DeviceMotionイベントが到着していません。Generic Sensor APIにフォールバックします。');
+            startGenericSensor();
+            // Android ChromeでモーションセンサーがOS/ブラウザ設定で無効化されている可能性
+            addLog('Androidの場合: Chromeの 設定 > サイトの設定 > 追加の権限 > モーションセンサー がオフだとデータは来ません。');
+          }
+        }, 1500);
+      } catch(e){
+        statusEl.textContent = '権限エラー: ' + e.message;
+      }
+    });
+
+    function onMotion(e){
+      const t = performance.now();
+      const ag = e.accelerationIncludingGravity || {x:0,y:0,z:0};
+      g.x = alpha * g.x + (1-alpha) * (ag.x || 0);
+      g.y = alpha * g.y + (1-alpha) * (ag.y || 0);
+      g.z = alpha * g.z + (1-alpha) * (ag.z || 0);
+      const lin = { x: (ag.x||0) - g.x, y: (ag.y||0) - g.y, z: (ag.z||0) - g.z };
+      const gnorm = Math.hypot(g.x, g.y, g.z) || 9.81;
+      const up = { x: -g.x/gnorm, y: -g.y/gnorm, z: -g.z/gnorm };
+      const aUp = lin.x*up.x + lin.y*up.y + lin.z*up.z;
+      gVal.textContent = `x: ${g.x.toFixed(2)}, y: ${g.y.toFixed(2)}, z: ${g.z.toFixed(2)} | |g|=${gnorm.toFixed(2)}`;
+      linVal.textContent = `x: ${lin.x.toFixed(2)}, y: ${lin.y.toFixed(2)}, z: ${lin.z.toFixed(2)}`;
+      upVal.textContent = `${aUp.toFixed(2)} m/s²`;
+      samples.push(t);
+      while (samples.length && t - samples[0] > 1000) samples.shift();
+      rateVal.textContent = samples.length.toString();
+      const threshold = parseFloat(thresholdEl.value);
+      const cooldown = parseInt(cooldownEl.value, 10);
+      if (aUp > threshold && (t - lastTrigger) > cooldown) {
+        lastTrigger = t;
+        trigger();
+      }
+    }
+.addEventListener('click', async () => {
+      try {
+        await requestPermissionIfNeeded();
+        start();
+      } catch(e){
+        statusEl.textContent = '権限エラー: ' + e.message;
+      }
+    });
+
+    muteBtn.addEventListener('click', ()=>{
+      muted = !muted; muteBtn.textContent = muted ? '効果音オン' : '効果音ミュート';
+    });
+
+    thresholdEl.addEventListener('input', ()=>{
+      thresholdVal.textContent = (+thresholdEl.value).toFixed(1);
+    });
+    cooldownEl.addEventListener('input', ()=>{
+      cooldownVal.textContent = cooldownEl.value;
+    });
+
+    function onMotion(e){
+      const t = performance.now();
+      // 生の値（iOSはaccelerationがnullな場合があるためincludingGravityを必ず参照）
+      const ag = e.accelerationIncludingGravity || {x:0,y:0,z:0};
+
+      // Low-passで重力を推定
+      g.x = alpha * g.x + (1-alpha) * (ag.x || 0);
+      g.y = alpha * g.y + (1-alpha) * (ag.y || 0);
+      g.z = alpha * g.z + (1-alpha) * (ag.z || 0);
+
+      // 線形加速度（重力の除去）
+      const lin = { x: (ag.x||0) - g.x, y: (ag.y||0) - g.y, z: (ag.z||0) - g.z };
+
+      // 上方向（＝重力の反対）への単位ベクトル
+      const gnorm = norm(g) || 9.81; // 初期安定前の保険
+      const up = { x: -g.x/gnorm, y: -g.y/gnorm, z: -g.z/gnorm };
+
+      // 上方向成分：lin・up
+      const aUp = lin.x*up.x + lin.y*up.y + lin.z*up.z;
+
+      // UI更新（軽量化のため間引き可）
+      gVal.textContent = `x: ${g.x.toFixed(2)}, y: ${g.y.toFixed(2)}, z: ${g.z.toFixed(2)} | |g|=${gnorm.toFixed(2)}`;
+      linVal.textContent = `x: ${lin.x.toFixed(2)}, y: ${lin.y.toFixed(2)}, z: ${lin.z.toFixed(2)}`;
+      upVal.textContent = `${aUp.toFixed(2)} m/s²`;
+
+      // レート推定
+      samples.push(t);
+      while (samples.length && t - samples[0] > 1000) samples.shift();
+      rateVal.textContent = samples.length.toString();
+
+      // トリガ判定
+      const threshold = parseFloat(thresholdEl.value);
+      const cooldown = parseInt(cooldownEl.value, 10);
+      if (aUp > threshold && (t - lastTrigger) > cooldown) {
+        lastTrigger = t;
+        trigger();
+      }
+    }
+
+    function trigger(){
+      card.classList.remove('flash'); // 再起動用
+      void card.offsetWidth; // reflow
+      card.classList.add('flash');
+      if (!muted) { try { beep.currentTime = 0; beep.play(); } catch(e){} }
+      addLog('↑ 上方向ジャークを検知しました ' + new Date().toLocaleTimeString());
+    }
+
+    // 初期UI
+    thresholdVal.textContent = (+thresholdEl.value).toFixed(1);
+    cooldownVal.textContent = cooldownEl.value;
+    statusEl.textContent = '「計測を有効化」を押して開始してください。';
+  </script>
+</body>
+</html>
