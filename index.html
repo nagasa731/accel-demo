@@ -173,7 +173,7 @@
                 return; // データが取れなければ何もしない
             }
 
-            dataDiv.textContent = `Z加速度 (振りの強さ): ${z_accel.toFixed(2)}`;
+            dataDiv.textContent = `Z加速度 : ${z_accel.toFixed(2)}`;
             if (statusDiv.textContent.startsWith('監視中...')) {
                 statusDiv.textContent = `監視中 (モード: ${sensorMode})`;
             }
