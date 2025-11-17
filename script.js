@@ -44,7 +44,7 @@ permissionButton.addEventListener('click', () => {
             })
             .catch(error => {
                 // エラー処理
-                statusDiv.textContent = '許可エラー: 'G' + error.message;
+                statusDiv.textContent = '許可エラー: ' + error.message;
             });
 
     } else {
