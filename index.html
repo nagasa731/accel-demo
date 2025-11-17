@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>加速度検知テスト v5 (傾き固定版)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <style>
+        /* (CSSはv4までと同じため省略...
+           前回のコードの <style>...</style> の内容を
+           そのままここにコピーしてください) */
+        
+        /* v4と同じスタイル */
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; text-align: center; padding: 20px; background-color: #f0f0f0; color: #333; transition: background-color 0.1s ease; }
+        h1 { font-size: 1.5rem; }
+        p { font-size: 1rem; }
+        #permissionButton { font-size: 1.2rem; padding: 15px 30px; cursor: pointer; border-radius: 10px; border: none; background-color: #007aff; color: white; font-weight: bold; box-shadow: 0 4px 10px rgba(0,0,0,0.1); margin: 20px 0; }
+        #status { font-size: 0.9rem; color: #555; margin-top: 20px; min-height: 1.2em; }
+        #data { font-size: 1.8rem; font-weight: bold; color: #000; margin-top: 10px; min-height: 1.5em; }
+        /* ▼▼▼ 傾き表示用CSSを追加 ▼▼▼ */
+        #orientationData {
+            font-size: 1.0rem;
+            color: #333;
+            margin-top: 10px;
+            min-height: 1.2em;
+        }
+        /* ▲▲▲ */
+        #result { font-size: 3rem; font-weight: 800; color: #d90000; min-height: 1.5em; margin-top: 10px; }
+        body.detected { background-color: #ffcccc; }
+        hr { border: 0; border-top: 1px solid #ccc; margin: 30px 10px; }
+        h2 { font-size: 1.2rem; }
+        .setting-container { margin: 20px 0; padding: 10px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        #thresholdSlider { width: 70%; margin: 10px 0; }
+        #thresholdValue { font-weight: bold; font-size: 1.1rem; color: #007aff; display: inline-block; width: 40px; }
+        h3 { font-size: 1.1rem; }
+        #logList { list-style-type: none; padding: 0; margin-top: 10px; max-height: 200px; overflow-y: auto; border: 1px solid #ccc; background-color: #fff; border-radius: 8px; text-align: left; }
+        #logList li { padding: 8px 12px; border-bottom: 1px solid #eee; font-size: 0.9rem; }
+        #logList li:nth-child(odd) { background-color: #f9f9f9; }
+    </style>
+</head>
+<body>
+
+    <h1>スマホ加速度検知 v5</h1>
+    <p>「開始」ボタンを押し、画面を上(並行)に向けたまま、スマホを上に素早く振ってください。</p>
+
+    <button id="permissionButton">検知を開始</button>
+    
+    <div id="status">許可待ち...</div>
+    <div id="data">Z加速度: 0.00</div>
+    <div id="orientationData">傾き(B/G): 0.0 / 0.0</div>
+    <div id="result"></div>
+    
+    <hr>
+    
+    <h2>設定とログ</h2>
+    <div class="setting-container">
+        <label for="thresholdSlider">検知しきい値 (振りの強さ): </label>
+        <input type="range" id="thresholdSlider" min="5" max="40" step="1" value="15">
+        <span id="thresholdValue">15.0</span>
+    </div>
+    <div class="setting-container" style="padding: 15px;">
+        <label for="filterToggle">傾きフィルターを有効にする (画面が上向きの時だけ検知)</label>
+        <input type="checkbox" id="filterToggle" checked>
+    </div>
+    <h3>検知ログ (最新が上)</h3>
+    <ul id="logList"></ul>
+
+
+    <script>
+        // DOM要素 (v4から追加)
+        const permissionButton = document.getElementById('permissionButton');
+        const statusDiv = document.getElementById('status');
+        const dataDiv = document.getElementById('data');
+        const orientationDataDiv = document.getElementById('orientationData'); // 傾き表示
+        const resultDiv = document.getElementById('result');
+        const thresholdSlider = document.getElementById('thresholdSlider');
+        const thresholdValueSpan = document.getElementById('thresholdValue');
+        const filterToggle = document.getElementById('filterToggle'); // フィルタスイッチ
+        const logList = document.getElementById('logList');
+
+        // しきい値
+        let THRESHOLD = parseFloat(thresholdSlider.value);
+        let isDetecting = false;
+        
+        // 加速度計算用 (v4と同じ)
+        let gravityZ = 0; 
+        const ALPHA = 0.8; 
+        let sensorMode = 'Unknown'; 
+        
+        // ▼▼▼ 傾き保存用グローバル変数 ▼▼▼
+        let currentBeta = 0;  // 前後の傾き (X軸周り)
+        let currentGamma = 0; // 左右の傾き (Y軸周り)
+        
+        // 傾き判定の許容角度 (±30度までを「平坦」とみなす)
+        const ANGLE_THRESHOLD = 30.0; 
+        // ▲▲▲
+
+        // スライダーの処理 (v4と同じ)
+        thresholdSlider.addEventListener('input', () => {
+            THRESHOLD = parseFloat(thresholdSlider.value);
+            thresholdValueSpan.textContent = THRESHOLD.toFixed(1);
+        });
+
+        // 1. 許可ボタンのクリックイベント (▼▼▼ 修正 ▼▼▼)
+        permissionButton.addEventListener('click', () => {
+            
+            // 加速度(Motion)の許可リクエスト (iOS/Android対応)
+            const motionPromise = (typeof DeviceMotionEvent.requestPermission === 'function') 
+                ? DeviceMotionEvent.requestPermission() 
+                : Promise.resolve('granted'); // Android等は 'granted' 扱いで即解決
+
+            // 傾き(Orientation)の許可リクエスト (iOS/Android対応)
+            const orientationPromise = (typeof DeviceOrientationEvent.requestPermission === 'function')
+                ? DeviceOrientationEvent.requestPermission()
+                : Promise.resolve('granted'); // Android等は 'granted' 扱いで即解決
+
+            // 両方の許可を同時にリクエスト
+            Promise.all([motionPromise, orientationPromise])
+                .then(results => {
+                    const motionState = results[0];
+                    const orientationState = results[1];
+
+                    // 両方 (またはAndroidで不要なもの) が許可されたら
+                    if (motionState === 'granted' && orientationState === 'granted') {
+                        startMonitoring(); // 監視開始
+                    } else {
+                        statusDiv.textContent = '加速度または傾きセンサーの使用が許可されませんでした。';
+                    }
+                })
+                .catch(error => {
+                    statusDiv.textContent = '許可エラー: ' + error.message;
+                });
+        });
+
+        // 2. 監視を開始する関数 (▼▼▼ 修正 ▼▼▼)
+        function startMonitoring() {
+            permissionButton.style.display = 'none';
+            statusDiv.textContent = '監視中... 画面を上に向けて上に振ってください'; 
+            
+            // 加速度(Motion)のリスナーを登録
+            window.addEventListener('devicemotion', handleMotionEvent);
+            
+            // 傾き(Orientation)のリスナーを登録
+            window.addEventListener('deviceorientation', handleOrientation);
+        }
+
+        // 3. (▼▼▼ 新規追加 ▼▼▼) 'deviceorientation' イベント処理
+        function handleOrientation(event) {
+            // beta (前後の傾き) と gamma (左右の傾き) をグローバル変数に保存
+            // 
+            if (typeof event.beta === 'number' && typeof event.gamma === 'number') {
+                currentBeta = event.beta;
+                currentGamma = event.gamma;
+                
+                // 画面に現在の傾きを表示
+                orientationDataDiv.textContent = `傾き(B/G): ${currentBeta.toFixed(1)} / ${currentGamma.toFixed(1)}`;
+            }
+        }
+
+        // 4. 'devicemotion' イベント処理 (▼▼▼ 判定ロジック修正 ▼▼▼)
+        function handleMotionEvent(event) {
+            
+            // (Z軸加速度の計算ロジックは v4 と同じ)
+            let z_accel_raw = 0;
+            let z_accel = 0;     
+
+            if (event.acceleration && typeof event.acceleration.z === 'number') { 
+                if (sensorMode === 'Unknown') sensorMode = 'A (重力除く)';
+                z_accel_raw = event.acceleration.z;
+                z_accel = z_accel_raw;
+            
+            } else if (event.accelerationIncludingGravity && typeof event.accelerationIncludingGravity.z === 'number') { 
+                if (sensorMode === 'Unknown') sensorMode = 'G (重力込み)';
+                z_accel_raw = event.accelerationIncludingGravity.z;
+                gravityZ = ALPHA * gravityZ + (1 - ALPHA) * z_accel_raw;
+                z_accel = z_accel_raw - gravityZ; 
+
+            } else {
+                return; // データが取れなければ何もしない
+            }
+
+            dataDiv.textContent = `Z加速度 (振りの強さ): ${z_accel.toFixed(2)}`;
+            if (statusDiv.textContent.startsWith('監視中...')) {
+                statusDiv.textContent = `監視中 (モード: ${sensorMode})`;
+            }
+
+            // --- 検知判定 ---
+            if (z_accel > THRESHOLD && !isDetecting) {
+                
+                // (★) 傾きフィルターの判定
+                const isFilterEnabled = filterToggle.checked;
+                
+                // フィルターOFF、または、フィルターONで「平坦」な場合
+                const isFlat = Math.abs(currentBeta) < ANGLE_THRESHOLD && Math.abs(currentGamma) < ANGLE_THRESHOLD;
+                
+                if (!isFilterEnabled || (isFilterEnabled && isFlat)) {
+                    // 検知成功！
+                    isDetecting = true;
+                    resultDiv.textContent = '検知！';
+                    document.body.classList.add('detected');
+
+                    // --- ログ追加処理 ---
+                    const now = new Date();
+                    const timeString = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+                    const logEntry = document.createElement('li');
+                    // ログに傾き情報も追加
+                    logEntry.textContent = `[${timeString}] 検知: ${z_accel.toFixed(2)} (B/G: ${currentBeta.toFixed(0)}/${currentGamma.toFixed(0)}, Mode: ${sensorMode})`;
+                    logList.prepend(logEntry);
+                    // ---
+
+                    console.log(`検知: ${z_accel.toFixed(2)} m/s^2`);
+
+                    setTimeout(() => {
+                        resultDiv.textContent = '';
+                        document.body.classList.remove('detected');
+                        isDetecting = false;
+                    }, 1000);
+                    
+                } else {
+                    // 加速度は超えたが、傾きが範囲外だったためスキップ
+                    console.log(`検知スキップ: 傾きが範囲外 (Beta: ${currentBeta.toFixed(1)}, Gamma: ${currentGamma.toFixed(1)})`);
+                }
+            }
+        }
+    </script>
+
+</body>
+</html>
